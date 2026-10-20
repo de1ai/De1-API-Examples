@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import axios from 'axios';
+import { BigNumber } from 'bignumber.js';
 import {
   supportedChains,
   switchToSupportedChain,
@@ -8,6 +9,26 @@ import {
   isChainSupported
 } from '../utils/chainUtils';
 import './Pages.css';
+
+// EIP-712 types for the DCA order (openocean DCA Protocol v2)
+const DCA_ORDER_EIP712_TYPES = {
+  Order: [
+    { name: 'from', type: 'address' },
+    { name: 'srcToken', type: 'address' },
+    { name: 'dstToken', type: 'address' },
+    { name: 'amountIn', type: 'uint256' },
+    { name: 'minReturn', type: 'uint256' },
+    { name: 'amountAll', type: 'uint256' },
+    { name: 'count', type: 'uint256' },
+    { name: 'deadline', type: 'uint256' },
+    { name: 'salt', type: 'uint256' },
+  ],
+};
+
+// Convert an amount to an integer string with the given decimals
+const amount2Decimals = (amount, decimals) => {
+  return BigNumber(amount).multipliedBy(BigNumber(10).pow(decimals)).toFixed(0);
+};
 
 /**
  * DCA (Dollar Cost Averaging) Component
@@ -225,34 +246,60 @@ const Dca = () => {
       // Contract address for DCA operations
       const contractAddress = '0x6cBB2598881940D08d5Ea3fA8F557E02996e1031';
 
+      const makerAmountBase = amount2Decimals(makerAmount, inToken.decimals);
+
       // Check and approve token if needed (for non-native tokens)
       if (!isNativeToken(inToken.address)) {
-        const approvalAmount = makerAmount * (10 ** inToken.decimals);
-        await checkTokenApproval(inToken.address, contractAddress, approvalAmount, walletAccount, provider);
+        await checkTokenApproval(inToken.address, contractAddress, makerAmountBase, walletAccount, provider);
       }
 
-      // Prepare DCA parameters
-      const messageParams = {
-        makerAsset: inToken.address,
-        takerAsset: outToken.address,
-        makerAmount: (makerAmount * (10 ** inToken.decimals)).toString(),
-      };
+      // Prepare DCA EIP-712 order parameters
+      const dcaCount = Number(frequency);
+      const dcaIntervalSeconds = everyUnit * time;
+      // Amount per trade = total amount / number of trades
+      const amountIn = BigNumber(makerAmountBase).div(dcaCount).toFixed(0, BigNumber.ROUND_FLOOR);
+      const bufferCount = dcaIntervalSeconds / 60 == 1 ? 1 : 0;
+      const deadline = Math.floor((Date.now() + dcaIntervalSeconds * (dcaCount + bufferCount) * 1000 + 120000) / 1000);
+      const salt = ethers.toBigInt(ethers.randomBytes(32)).toString();
 
-      // Create message for signing
-      const message = `makerAsset:\n${messageParams.makerAsset}\ntakerAsset:\n${messageParams.takerAsset}\nmakerAmount:\n${messageParams.makerAmount}`;
+      const domain = {
+        name: 'openocean DCA Protocol',
+        version: '2',
+        chainId: Number(chain.chainId),
+        verifyingContract: contractAddress,
+      };
       const signer = await provider.getSigner();
-      const signature = await signer.signMessage(message);
+      const value = {
+        from: walletAccount,
+        srcToken: ethers.getAddress(inToken.address),
+        dstToken: ethers.getAddress(outToken.address),
+        amountIn,
+        minReturn: 1,
+        amountAll: makerAmountBase,
+        count: dcaCount,
+        deadline,
+        salt,
+      };
+      const orderHash = ethers.TypedDataEncoder.hash(domain, DCA_ORDER_EIP712_TYPES, value);
+      const signature = await signer.signTypedData(domain, DCA_ORDER_EIP712_TYPES, value);
 
       // Prepare order object
       const order = {
-        ...messageParams,
+        makerAsset: inToken.address,
+        takerAsset: outToken.address,
+        makerAmount: makerAmountBase,
+        orderHash,
+        salt,
+        deadline,
         signature,
         orderMaker: walletAccount,
-        minPrice: minPrice || 0,
-        maxPrice: maxPrice || 0,
-        time: everyUnit * time,
-        times: frequency,
+        time: dcaIntervalSeconds,
+        times: dcaCount,
       };
+      if (minPrice && maxPrice) {
+        order.minPrice = minPrice;
+        order.maxPrice = maxPrice;
+      }
 
       // Submit DCA order to De¹ API
       const { data } = await axios.post(

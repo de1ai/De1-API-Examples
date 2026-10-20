@@ -136,11 +136,8 @@ export const utils = {
   },
 
   getLimitContractAddress: (chainName) => {
-    const contractAddress = CONTRACT_ADDRESSES[chainName];
-    if (!contractAddress) {
-      throw new Error(`Contract address not found for chain ${chainName}`);
-    }
-    return contractAddress;
+    // De¹ limit order contract address (unified across chains)
+    return '0xC9d8Eaf3D32cACe17AAfa7D290533E280f2fF137';
   }
 };
 

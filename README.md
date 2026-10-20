@@ -19,6 +19,7 @@ This project demonstrates the following De¹ APIs:
 - **Swap API** - Cross-chain token swapping
 - **Limit Order API** - Create and manage limit orders
 - **DCA API** - Dollar Cost Averaging
+- **Gasless API** - Gasless transactions
 
 ## 🛠️ Tech Stack
 

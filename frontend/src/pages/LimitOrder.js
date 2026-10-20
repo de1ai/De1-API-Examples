@@ -1,6 +1,7 @@
 import React, { useEffect, useCallback, useMemo } from 'react';
 import { ethers } from 'ethers';
 import axios from 'axios';
+import { BigNumber } from 'bignumber.js';
 import { supportedChains } from '../utils/chainUtils';
 import {
   CONSTANTS,
@@ -12,6 +13,23 @@ import {
 } from '../utils/limitOrderUtils';
 import { useWalletConnection } from '../hooks/useWalletConnection';
 import './Pages.css';
+
+// EIP-712 types for the limit order (openocean Limit Order Protocol v2)
+const LIMIT_ORDER_EIP712_TYPES = {
+  Order: [
+    { name: 'from', type: 'address' },
+    { name: 'srcToken', type: 'address' },
+    { name: 'dstToken', type: 'address' },
+    { name: 'amountIn', type: 'uint256' },
+    { name: 'minReturn', type: 'uint256' },
+    { name: 'deadline', type: 'uint256' },
+  ],
+};
+
+// Convert an amount to an integer string with the given decimals
+const amount2Decimals = (amount, decimals) => {
+  return BigNumber(amount).multipliedBy(BigNumber(10).pow(decimals)).toFixed(0);
+};
 
 // Token approval related functions
 const tokenApproval = {
@@ -302,12 +320,14 @@ const LimitOrder = () => {
 
       const contractAddress = utils.getLimitContractAddress(CHAIN_CONFIG.chainName);
 
+      const makerAmountBase = amount2Decimals(state.makerAmount, TOKEN_CONFIG.inToken.decimals);
+      const takerAmountBase = amount2Decimals(state.takerAmount, TOKEN_CONFIG.outToken.decimals);
+
       if (!utils.isNativeToken(TOKEN_CONFIG.inToken.address)) {
-        const approvalAmount = state.makerAmount * (10 ** TOKEN_CONFIG.inToken.decimals);
         await tokenApproval.checkTokenApproval(
           TOKEN_CONFIG.inToken.address,
           contractAddress,
-          approvalAmount,
+          makerAmountBase,
           state.walletAccount,
           state.provider
         );
@@ -316,17 +336,35 @@ const LimitOrder = () => {
       const messageParams = {
         makerAsset: TOKEN_CONFIG.inToken.address,
         takerAsset: TOKEN_CONFIG.outToken.address,
-        makerAmount: (state.makerAmount * (10 ** TOKEN_CONFIG.inToken.decimals)).toString(),
-        takerAmount: (state.takerAmount * (10 ** TOKEN_CONFIG.outToken.decimals)).toString(),
-        expireTime: state.expireTime,
+        makerAmount: makerAmountBase,
+        takerAmount: takerAmountBase,
+        expireTime: Number(state.expireTime),
       };
 
-      const message = `makerAsset:\n${messageParams.makerAsset}\ntakerAsset:\n${messageParams.takerAsset}\nmakerAmount:\n${messageParams.makerAmount}\ntakerAmount:\n${messageParams.takerAmount}\nexpireTime:\n${messageParams.expireTime}`;
+      // Sign the order with EIP-712 typed data
+      const deadline = Math.floor(Date.now() / 1000) + Math.floor(Number(state.expireTime) / 1000);
+      const domain = {
+        name: 'openocean Limit Order Protocol',
+        version: '2',
+        chainId: Number(CHAIN_CONFIG.chainId),
+        verifyingContract: contractAddress,
+      };
       const signer = await state.provider.getSigner();
-      const signature = await signer.signMessage(message);
+      const value = {
+        from: state.walletAccount,
+        srcToken: ethers.getAddress(TOKEN_CONFIG.inToken.address),
+        dstToken: ethers.getAddress(TOKEN_CONFIG.outToken.address),
+        amountIn: makerAmountBase,
+        minReturn: takerAmountBase,
+        deadline,
+      };
+      const orderHash = ethers.TypedDataEncoder.hash(domain, LIMIT_ORDER_EIP712_TYPES, value);
+      const signature = await signer.signTypedData(domain, LIMIT_ORDER_EIP712_TYPES, value);
 
       const order = {
         ...messageParams,
+        orderHash,
+        deadline,
         signature,
         orderMaker: state.walletAccount,
       };

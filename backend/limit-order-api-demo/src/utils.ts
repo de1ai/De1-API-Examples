@@ -1,5 +1,5 @@
 import { ethers } from "ethers";
-import { RPCS, PrivateKey, NATIVE_TOKEN_ADDRESSES, ERC20_ABI, CONTRACT_ADDRESSES } from "./const";
+import { RPCS, PrivateKey, NATIVE_TOKEN_ADDRESSES, ERC20_ABI } from "./const";
 
 export const utils = {
   isNativeToken: (address: string): boolean => {
@@ -8,12 +8,9 @@ export const utils = {
     return NATIVE_TOKEN_ADDRESSES.includes(addr);
   },
 
-  getLimitContractAddress: (chainName: string): string => {
-    const contractAddress = CONTRACT_ADDRESSES[chainName];
-    if (!contractAddress) {
-      throw new Error(`Contract address not found for chain ${chainName}`);
-    }
-    return contractAddress;
+  getLimitContractAddress: (_chainName: string): string => {
+    // De¹ limit order contract address (unified across chains)
+    return "0xC9d8Eaf3D32cACe17AAfa7D290533E280f2fF137";
   }
 };
 

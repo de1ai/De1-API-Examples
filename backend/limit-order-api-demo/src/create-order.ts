@@ -1,6 +1,19 @@
 import axios from "axios";
+import { ethers } from "ethers";
 import { BaseUrl } from "./const";
 import { getSigner, checkTokenApproval, utils } from "./utils";
+
+// EIP-712 types for the limit order (openocean Limit Order Protocol v2)
+const LIMIT_ORDER_EIP712_TYPES = {
+  Order: [
+    { name: "from", type: "address" },
+    { name: "srcToken", type: "address" },
+    { name: "dstToken", type: "address" },
+    { name: "amountIn", type: "uint256" },
+    { name: "minReturn", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+};
 
 /**
  * Create limit order using Ethers.js
@@ -20,8 +33,9 @@ export async function createEthers(
   try {
     const { wallet, signer } = await getSigner(chainId);
 
+    const contractAddress = utils.getLimitContractAddress("base");
+
     if (!utils.isNativeToken(inToken.address)) {
-      const contractAddress = utils.getLimitContractAddress("base");
       const approvalAmount = BigInt(Number(inToken.amount));
       await checkTokenApproval(inToken.address, contractAddress, approvalAmount, wallet.address, signer);
     }
@@ -29,8 +43,24 @@ export async function createEthers(
     const makerAmount = inToken.amount.toString();
     const takerAmount = outToken.amount.toString();
 
-    const message = `makerAsset:\n${inToken.address}\ntakerAsset:\n${outToken.address}\nmakerAmount:\n${makerAmount}\ntakerAmount:\n${takerAmount}\nexpireTime:\n${expireTime}`;
-    const signature = await signer.signMessage(message);
+    // Sign the order with EIP-712 typed data
+    const deadline = Math.floor(Date.now() / 1000) + Math.floor(Number(expireTime) / 1000);
+    const domain = {
+      name: "openocean Limit Order Protocol",
+      version: "2",
+      chainId: Number(chainId),
+      verifyingContract: contractAddress,
+    };
+    const value = {
+      from: wallet.address,
+      srcToken: ethers.getAddress(inToken.address),
+      dstToken: ethers.getAddress(outToken.address),
+      amountIn: makerAmount,
+      minReturn: takerAmount,
+      deadline,
+    };
+    const orderHash = ethers.TypedDataEncoder.hash(domain, LIMIT_ORDER_EIP712_TYPES, value);
+    const signature = await signer.signTypedData(domain, LIMIT_ORDER_EIP712_TYPES, value);
 
     const order = {
       makerAsset: inToken.address,
@@ -39,6 +69,8 @@ export async function createEthers(
       takerAmount,
       orderMaker: wallet.address,
       expireTime,
+      orderHash,
+      deadline,
       signature,
       referrer: '',
       referrerFee: 0,

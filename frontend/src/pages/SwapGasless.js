@@ -205,7 +205,7 @@ const Swap = () => {
     try {
       setIsLoading(true);
 
-      const fromAmountDecimals = fromAmount * 10 ** inToken.decimals;
+      const fromAmountDecimals = BigNumber(fromAmount).multipliedBy(BigNumber(10).pow(inToken.decimals)).toFixed(0);
       let params = {
         inTokenAddress: inToken.address,
         outTokenAddress: outToken.address,
@@ -220,7 +220,7 @@ const Swap = () => {
       let res = await axios.get(url);
 
       // Destructure API response data, rename inToken to avoid conflict with component state
-      const { inAmount, data, to, fees, flags, hash } = res.data.data;
+      const { inAmount, data, to, fees, flags, hash, minOutAmount } = res.data.data;
       let swapParams = {
         from: walletAccount,
         to,
@@ -249,8 +249,10 @@ const Swap = () => {
         to: to,
         data: data,
         amountDecimals: params.amountDecimals,
-        feeAmount1: fees[0] ? (+fees[0].inFeeAmount * (10 ** fees[0].decimals)) : 0,
-        feeAmount2: fees[1] ? (+fees[1].inFeeAmount * (10 ** fees[1].decimals)) : 0,
+        feeAmount1: fees[0] ? amount2Decimals(+fees[0].inFeeAmount, fees[0].decimals) : 0,
+        feeAmount2: fees[1] ? amount2Decimals(+fees[1].inFeeAmount, fees[1].decimals) : 0,
+        ceilingFee: fees[0] && fees[0].ceiling_fee ? amount2Decimals(+fees[0].ceiling_fee, fees[0].decimals) : 0,
+        minOutAmount: minOutAmount || 0,
         flag: flags,
         gasPriceDecimals: gasPrice,
         deadline: deadline,
@@ -258,11 +260,17 @@ const Swap = () => {
         outToken: outToken.address,
         nonce: Number(nonce),
         permit: permit,
-        // hash: hash,
-        // usd_valuation: Number((Number(params.amountDecimals) * Number(inToken.usd)).toFixed(4))
+        usd_valuation: Number((Number(fromAmount) * Number(inToken.usd || inToken.price || 0)).toFixed(4)),
+        hash: hash || ''
       }
+
+      // Sign the gasless order (EIP-712) before submitting
+      const signedOrder = await signGaslessOrder(gasLessData);
+      gasLessData.orderHash = signedOrder.orderHash;
+      gasLessData.signature = signedOrder.signature;
+
       let resGasless = await axios.post(`${baseUrl}/gasless/${chain.chainId}/swap`, gasLessData)
-      if (!resGasless.data.orderHash) throw new Error(resGasless.msg || resGasless.err || 'Transaction error')
+      if (!resGasless.data.orderHash) throw new Error(resGasless.data.msg || resGasless.data.err || 'Transaction error')
       let hashSwap = await getGasHashTimeout(resGasless.data.orderHash, 0)
       if (hashSwap) {
         console.log('Transaction successful:', hashSwap);
@@ -309,6 +317,75 @@ const Swap = () => {
   }
 
   /**
+   * Convert an amount to an integer string with the given decimals
+   */
+  const amount2Decimals = (amount, decimals) => {
+    return BigNumber(amount).multipliedBy(BigNumber(10).pow(decimals)).toFixed(0);
+  }
+
+  /**
+   * Get the De¹ gasless spender address for the current chain
+   */
+  const getPermit2Spender = () => {
+    return Number(chain.chainId) === 10
+      ? '0x8A468ff6b4d06535C05A47940865e70dc322a72b'
+      : '0xB1DD8E9ebbF5F150B75642D1653dF0dacd0bfF47'
+  }
+
+  /**
+   * EIP-712 types for the gasless swap order
+   */
+  const GASLESS_SWAP_EIP712_TYPES = {
+    Swap: [
+      { name: 'from', type: 'address' },
+      { name: 'srcToken', type: 'address' },
+      { name: 'dstToken', type: 'address' },
+      { name: 'amountIn', type: 'uint256' },
+      { name: 'minReturnAmount', type: 'uint256' },
+      { name: 'fee', type: 'uint256' },
+      { name: 'gasFee', type: 'uint256' },
+      { name: 'swapAddress', type: 'address' },
+      { name: 'swapDataHash', type: 'bytes32' },
+      { name: 'permitNonce', type: 'uint256' },
+      { name: 'flag', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+    ],
+  };
+
+  /**
+   * Sign the gasless order with EIP-712 typed data
+   * @param {Object} gasLessData - Gasless swap order payload
+   * @returns {Object} orderHash and signature
+   */
+  const signGaslessOrder = async (gasLessData) => {
+    const verifyingContract = getPermit2Spender();
+    const domain = {
+      name: 'Gasless Protocol',
+      version: '2',
+      chainId: Number(chain.chainId),
+      verifyingContract,
+    };
+    const value = {
+      from: ethers.getAddress(gasLessData.from),
+      srcToken: ethers.getAddress(gasLessData.inToken),
+      dstToken: ethers.getAddress(gasLessData.outToken),
+      amountIn: BigNumber(gasLessData.amountDecimals).toFixed(0),
+      minReturnAmount: BigNumber(gasLessData.minOutAmount || 0).toFixed(0),
+      fee: BigNumber(gasLessData.feeAmount1 || 0).toFixed(0),
+      gasFee: BigNumber(gasLessData.feeAmount2 || 0).toFixed(0),
+      swapAddress: ethers.getAddress(gasLessData.to),
+      swapDataHash: ethers.keccak256(gasLessData.data),
+      permitNonce: gasLessData.nonce.toString(),
+      flag: (gasLessData.flag || 0).toString(),
+      deadline: gasLessData.deadline.toString(),
+    };
+    const orderHash = ethers.TypedDataEncoder.hash(domain, GASLESS_SWAP_EIP712_TYPES, value);
+    const signer = await provider.getSigner();
+    const signature = await signer.signTypedData(domain, GASLESS_SWAP_EIP712_TYPES, value);
+    return { orderHash, signature };
+  };
+
+  /**
    * Get Permit2 contract address for the specified chain
    */
   const getPermit2ContractAddress = async (chainCode) => {
@@ -330,7 +407,7 @@ const Swap = () => {
   const setPermit2Signer = async (amount, token, permit2Address) => {
     try {
       // De¹ gasless spender address
-      let spender = '0xB1DD8E9ebbF5F150B75642D1653dF0dacd0bfF47'
+      let spender = getPermit2Spender()
       let deadline = Math.floor(Date.now() / 1000) + 60 * 30; // 30 minutes from now
       let nonce = await getPermit2Nonce(spender);
 
